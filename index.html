@@ -1,0 +1,346 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="color-scheme" content="dark" />
+  <title>1 : 139,838,160 — Pixel Lotto</title>
+  <style>
+    :root {
+      --bg: #0b0c0e;
+      --panel: #121418;
+      --border: #23272f;
+      --text: #e2e6ed;
+      --muted: #7c8594;
+      --accent: #38bdf8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body {
+      width: 100%; height: 100%;
+      background: var(--bg);
+      color: var(--text);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      overflow: hidden;
+      user-select: none;
+    }
+    canvas { display: block; width: 100vw; height: 100vh; cursor: crosshair; }
+
+    .hud {
+      position: fixed; top: 16px; left: 16px;
+      width: 340px; max-width: calc(100vw - 32px);
+      background: rgba(18, 20, 24, 0.92);
+      backdrop-filter: blur(8px);
+      border: 1px solid var(--border);
+      padding: 16px;
+      display: flex; flex-direction: column; gap: 12px;
+      font-size: 12px; line-height: 1.5;
+    }
+    h1 { font-size: 14px; font-weight: 600; letter-spacing: 0.04em; }
+    .sub { color: var(--muted); font-size: 11px; }
+    .stats {
+      display: grid; grid-template-columns: 1fr 1fr; gap: 6px 12px;
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 10px 0;
+    }
+    .label { color: var(--muted); }
+    .val { text-align: right; font-variant-numeric: tabular-nums; }
+    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    button {
+      background: #1a1e24; color: var(--text);
+      border: 1px solid var(--border);
+      padding: 6px 10px; font: inherit; font-size: 11px;
+      cursor: pointer; flex: 1;
+    }
+    button:hover { border-color: var(--accent); }
+    button.active { background: #162a38; border-color: var(--accent); color: var(--accent); }
+
+    .result {
+      padding: 10px; background: #0e1013; border: 1px solid var(--border);
+      min-height: 54px;
+    }
+    .legend {
+      display: grid; grid-template-columns: auto 1fr auto; gap: 4px 8px;
+      align-items: center; font-size: 11px; color: var(--muted);
+    }
+    .swatch { width: 10px; height: 10px; display: inline-block; }
+  </style>
+</head>
+<body>
+  <canvas id="grid"></canvas>
+
+  <aside class="hud">
+    <div>
+      <h1>PIXEL LOTTO (6aus49)</h1>
+      <p class="sub">11,825 × 11,825 = 139,830,625 pixels. Pick one.</p>
+    </div>
+
+    <div class="stats">
+      <span class="label">CURSOR</span><span class="val" id="coord">—</span>
+      <span class="label">ZOOM</span><span class="val" id="zoomVal">1.00×</span>
+      <span class="label">ATTEMPTS</span><span class="val" id="attempts">0</span>
+      <span class="label">SPENT (€1.20)</span><span class="val" id="spent">€0.00</span>
+    </div>
+
+    <div class="result" id="result">
+      Scroll to zoom, drag to pan, click any pixel to play.
+    </div>
+
+    <div class="controls">
+      <button id="btnRandom">Quick Pick</button>
+      <button id="btnReset">Fit Grid</button>
+      <button id="btnReveal">Reveal Odds</button>
+    </div>
+
+    <div class="legend" id="legend"></div>
+  </aside>
+
+  <script>
+    const GRID_SIZE = 11825; // 11825^2 = 139,830,625 (~1:140M)
+    const TICKET_COST = 1.20;
+
+    // Exact area-equivalent square regions derived from real 6aus49 probabilities
+    const TIERS = [
+      { name: '6 + Super', odds: '1 : 139,838,160', size: 1,    color: '#ff2a6d' },
+      { name: '6',         odds: '1 : 15,537,573',  size: 3,    color: '#ff7b00' },
+      { name: '5 + Super', odds: '1 : 542,008',     size: 16,   color: '#ffd000' },
+      { name: '5',         odds: '1 : 60,223',      size: 48,   color: '#aacc00' },
+      { name: '4 + Super', odds: '1 : 10,324',      size: 116,  color: '#38b000' },
+      { name: '4',         odds: '1 : 1,147',       size: 349,  color: '#00b4d8' },
+      { name: '3 + Super', odds: '1 : 567',         size: 497,  color: '#3a86ff' },
+      { name: '3',         odds: '1 : 63',          size: 1490, color: '#8338ec' },
+    ];
+
+    // Deterministic non-overlapping placement for target zones
+    let zones = [];
+    function generateZones() {
+      zones = [];
+      for (const tier of TIERS) {
+        let placed = false;
+        while (!placed) {
+          const x = Math.floor(Math.random() * (GRID_SIZE - tier.size));
+          const y = Math.floor(Math.random() * (GRID_SIZE - tier.size));
+          const overlaps = zones.some(z =>
+            x < z.x + z.size && x + tier.size > z.x &&
+            y < z.y + z.size && y + tier.size > z.y
+          );
+          if (!overlaps) {
+            zones.push({ ...tier, x, y });
+            placed = true;
+          }
+        }
+      }
+    }
+
+    const canvas = document.getElementById('grid');
+    const ctx = canvas.getContext('2d');
+
+    let width = 0, height = 0, dpr = 1;
+    let camX = GRID_SIZE / 2;
+    let camY = GRID_SIZE / 2;
+    let zoom = 0.06;
+    let reveal = false;
+    let attempts = 0;
+    let lastPick = null;
+    let hoverCell = null;
+
+    function resize() {
+      dpr = window.devicePixelRatio || 1;
+      width = window.innerWidth;
+      height = window.innerHeight;
+      canvas.width = width * dpr;
+      canvas.height = height * dpr;
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      render();
+    }
+
+    function fitGrid() {
+      const margin = 80;
+      const available = Math.min(width - 380, height - margin);
+      zoom = Math.max(0.03, available / GRID_SIZE);
+      camX = GRID_SIZE / 2 - (170 / zoom);
+      camY = GRID_SIZE / 2;
+      render();
+    }
+
+    function screenToWorld(sx, sy) {
+      const wx = Math.floor((sx - width / 2) / zoom + camX);
+      const wy = Math.floor((sy - height / 2) / zoom + camY);
+      return { wx, wy };
+    }
+
+    function evaluatePick(wx, wy) {
+      attempts++;
+      lastPick = { wx, wy };
+      document.getElementById('attempts').textContent = attempts.toLocaleString();
+      document.getElementById('spent').textContent = `€${(attempts * TICKET_COST).toFixed(2)}`;
+
+      const hit = zones.find(z =>
+        wx >= z.x && wx < z.x + z.size &&
+        wy >= z.y && wy < z.y + z.size
+      );
+
+      const resEl = document.getElementById('result');
+      if (hit) {
+        resEl.innerHTML = `<strong style="color:${hit.color}">MATCH: ${hit.name}</strong><br>Odds: ${hit.odds} · Pixel (${wx}, ${wy})`;
+      } else {
+        const jp = zones[0];
+        const dist = Math.hypot(wx - jp.x, wy - jp.y).toFixed(0);
+        resEl.innerHTML = `<strong>NO WIN</strong> (96.83% loss space)<br>Distance to 1px Jackpot: ${Number(dist).toLocaleString()} px`;
+      }
+      render();
+    }
+
+    function render() {
+      ctx.fillStyle = '#0b0c0e';
+      ctx.fillRect(0, 0, width, height);
+
+      const left = (0 - width / 2) / zoom + camX;
+      const top = (0 - height / 2) / zoom + camY;
+      const right = (width - width / 2) / zoom + camX;
+      const bottom = (height - height / 2) / zoom + camY;
+
+      // Grid outer boundary
+      const gx = (0 - camX) * zoom + width / 2;
+      const gy = (0 - camY) * zoom + height / 2;
+      const gw = GRID_SIZE * zoom;
+
+      ctx.fillStyle = '#111317';
+      ctx.fillRect(gx, gy, gw, gw);
+      ctx.strokeStyle = '#2a2f3a';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(gx, gy, gw, gw);
+
+      // Reveal winning zones if toggled
+      if (reveal) {
+        for (const z of zones) {
+          const zx = (z.x - camX) * zoom + width / 2;
+          const zy = (z.y - camY) * zoom + height / 2;
+          const zw = Math.max(2, z.size * zoom); // Minimum 2px marker so 1px jackpot is findable when zoomed out
+          ctx.fillStyle = z.color;
+          ctx.fillRect(zx, zy, zw, zw);
+        }
+      }
+
+      // Draw individual pixel grid lines when zoomed in enough
+      if (zoom >= 6) {
+        const startX = Math.max(0, Math.floor(left));
+        const endX = Math.min(GRID_SIZE, Math.ceil(right));
+        const startY = Math.max(0, Math.floor(top));
+        const endY = Math.min(GRID_SIZE, Math.ceil(bottom));
+
+        ctx.strokeStyle = 'rgba(255,255,255,0.06)';
+        ctx.beginPath();
+        for (let x = startX; x <= endX; x++) {
+          const sx = (x - camX) * zoom + width / 2;
+          ctx.moveTo(sx, Math.max(gy, 0));
+          ctx.lineTo(sx, Math.min(gy + gw, height));
+        }
+        for (let y = startY; y <= endY; y++) {
+          const sy = (y - camY) * zoom + height / 2;
+          ctx.moveTo(Math.max(gx, 0), sy);
+          ctx.lineTo(Math.min(gx + gw, width), sy);
+        }
+        ctx.stroke();
+      }
+
+      // Hover highlight
+      if (hoverCell && hoverCell.wx >= 0 && hoverCell.wx < GRID_SIZE && hoverCell.wy >= 0 && hoverCell.wy < GRID_SIZE) {
+        const hx = (hoverCell.wx - camX) * zoom + width / 2;
+        const hy = (hoverCell.wy - camY) * zoom + height / 2;
+        const hs = Math.max(4, zoom);
+        ctx.strokeStyle = '#38bdf8';
+        ctx.strokeRect(hx, hy, hs, hs);
+      }
+
+      // Last picked pixel marker
+      if (lastPick) {
+        const px = (lastPick.wx - camX) * zoom + width / 2;
+        const py = (lastPick.wy - camY) * zoom + height / 2;
+        ctx.strokeStyle = '#ffffff';
+        ctx.beginPath();
+        ctx.arc(px + zoom / 2, py + zoom / 2, Math.max(6, zoom * 0.7), 0, Math.PI * 2);
+        ctx.stroke();
+      }
+
+      document.getElementById('zoomVal').textContent = `${zoom.toFixed(2)}×`;
+    }
+
+    // Pan & Zoom Interaction
+    let isDragging = false, dragMoved = false, lastX = 0, lastY = 0;
+
+    canvas.addEventListener('mousedown', e => {
+      isDragging = true; dragMoved = false;
+      lastX = e.clientX; lastY = e.clientY;
+    });
+
+    window.addEventListener('mousemove', e => {
+      hoverCell = screenToWorld(e.clientX, e.clientY);
+      if (hoverCell.wx >= 0 && hoverCell.wx < GRID_SIZE && hoverCell.wy >= 0 && hoverCell.wy < GRID_SIZE) {
+        document.getElementById('coord').textContent = `${hoverCell.wx}, ${hoverCell.wy}`;
+      } else {
+        document.getElementById('coord').textContent = 'OUT OF BOUNDS';
+      }
+
+      if (isDragging) {
+        const dx = e.clientX - lastX;
+        const dy = e.clientY - lastY;
+        if (Math.abs(dx) > 2 || Math.abs(dy) > 2) dragMoved = true;
+        camX -= dx / zoom;
+        camY -= dy / zoom;
+        lastX = e.clientX; lastY = e.clientY;
+      }
+      render();
+    });
+
+    window.addEventListener('mouseup', e => {
+      if (isDragging && !dragMoved) {
+        const { wx, wy } = screenToWorld(e.clientX, e.clientY);
+        if (wx >= 0 && wx < GRID_SIZE && wy >= 0 && wy < GRID_SIZE) {
+          evaluatePick(wx, wy);
+        }
+      }
+      isDragging = false;
+    });
+
+    canvas.addEventListener('wheel', e => {
+      e.preventDefault();
+      const { wx, wy } = screenToWorld(e.clientX, e.clientY);
+      const factor = e.deltaY < 0 ? 1.25 : 0.8;
+      zoom = Math.min(48, Math.max(0.03, zoom * factor));
+      camX = wx - (e.clientX - width / 2) / zoom;
+      camY = wy - (e.clientY - height / 2) / zoom;
+      render();
+    }, { passive: false });
+
+    // Controls
+    document.getElementById('btnRandom').addEventListener('click', () => {
+      const wx = Math.floor(Math.random() * GRID_SIZE);
+      const wy = Math.floor(Math.random() * GRID_SIZE);
+      camX = wx; camY = wy;
+      if (zoom < 12) zoom = 12;
+      evaluatePick(wx, wy);
+    });
+
+    document.getElementById('btnReset').addEventListener('click', fitGrid);
+
+    document.getElementById('btnReveal').addEventListener('click', e => {
+      reveal = !reveal;
+      e.target.classList.toggle('active', reveal);
+      render();
+    });
+
+    // Populate legend
+    document.getElementById('legend').innerHTML = TIERS.map(t => `
+      <span class="swatch" style="background:${t.color}"></span>
+      <span>${t.name} (${t.size}×${t.size}px)</span>
+      <span>${t.odds}</span>
+    `).join('');
+
+    generateZones();
+    window.addEventListener('resize', resize);
+    resize();
+    fitGrid();
+  </script>
+</body>
+</html>
